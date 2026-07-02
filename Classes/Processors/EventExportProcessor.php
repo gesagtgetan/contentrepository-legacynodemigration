@@ -50,6 +50,7 @@ use Neos\ContentRepository\LegacyNodeMigration\Helpers\HiddenNodeVariant;
 use Neos\ContentRepository\LegacyNodeMigration\Helpers\SerializedPropertyValuesAndReferences;
 use Neos\ContentRepository\LegacyNodeMigration\Helpers\VisitedNodeAggregate;
 use Neos\ContentRepository\LegacyNodeMigration\Helpers\VisitedNodeAggregates;
+use Neos\ContentRepository\LegacyNodeMigration\Helpers\VisitedNodeVariant;
 use Neos\ContentRepository\LegacyNodeMigration\RootNodeTypeMapping;
 use Neos\Flow\Persistence\Doctrine\DataTypes\JsonArrayType;
 use Neos\Flow\Property\PropertyMapper;
@@ -249,6 +250,7 @@ final class EventExportProcessor implements ProcessorInterface
 
         $claimedDimensionSpacePoints = $this->resolveCoverageClaim($nodeAggregateId, $originDimensionSpacePoint);
 
+        $variantSource = null;
         if ($this->isAutoCreatedChildNode($parentNodeAggregate->nodeTypeName, $nodeName) && !$this->visitedNodes->containsNodeAggregate($nodeAggregateId)) {
             // Create tethered node if the node was not found before.
             // If the node was already visited, we want to create a node variant (and keep the tethering status)
@@ -269,7 +271,11 @@ final class EventExportProcessor implements ProcessorInterface
             );
         } elseif ($this->visitedNodes->containsNodeAggregate($nodeAggregateId)) {
             // Create node variant, BOTH for tethered and regular nodes
-            $this->createNodeVariant($nodeAggregateId, $originDimensionSpacePoint, $claimedDimensionSpacePoints, $serializedPropertyValuesAndReferences, $parentNodeAggregate);
+            $variantSource = $this->determineVariantSource($nodeAggregateId, $originDimensionSpacePoint);
+            if ($variantSource === null) {
+                throw new MigrationException(sprintf('Node "%s" for dimension %s was already created previously', $nodeAggregateId->value, $originDimensionSpacePoint->toJson()), 1656057201);
+            }
+            $this->createNodeVariant($nodeAggregateId, $originDimensionSpacePoint, $variantSource, $claimedDimensionSpacePoints, $serializedPropertyValuesAndReferences, $parentNodeAggregate);
         } else {
             // create node aggregate
             $this->exportEvent(
@@ -295,11 +301,24 @@ final class EventExportProcessor implements ProcessorInterface
             $this->hiddenNodeVariants[] = new HiddenNodeVariant($nodeAggregateId, $originDimensionSpacePoint);
         }
 
-        if (!$serializedPropertyValuesAndReferences->references->isEmpty()) {
-            $this->nodeReferencesWereSetEvents[] = new NodeReferencesWereSet($this->workspaceName, $this->contentStreamId, $nodeAggregateId, new OriginDimensionSpacePointSet([$originDimensionSpacePoint]), $serializedPropertyValuesAndReferences->references);
+        // a variant creation event copied all reference relations of its source dimension. clear every
+        // copied reference name this row does not set itself, in the same deferred event that sets the
+        // row's own references; the two name sets are disjoint by construction
+        $ownReferenceNames = array_map(static fn (ReferenceName $referenceName) => $referenceName->value, $serializedPropertyValuesAndReferences->references->getReferenceNames());
+        $referencesToClear = [];
+        foreach ($variantSource?->referenceNames ?? [] as $copiedReferenceName) {
+            if (!in_array($copiedReferenceName->value, $ownReferenceNames, true)) {
+                $referencesToClear[] = SerializedNodeReferencesForName::fromTargets($copiedReferenceName, NodeAggregateIds::createEmpty());
+            }
+        }
+        $references = SerializedNodeReferences::fromArray([...$serializedPropertyValuesAndReferences->references->references, ...$referencesToClear]);
+        if (!$references->isEmpty()) {
+            $this->nodeReferencesWereSetEvents[] = new NodeReferencesWereSet($this->workspaceName, $this->contentStreamId, $nodeAggregateId, new OriginDimensionSpacePointSet([$originDimensionSpacePoint]), $references);
         }
 
-        $this->visitedNodes->add($nodeAggregateId, new DimensionSpacePointSet([$originDimensionSpacePoint->toDimensionSpacePoint()]), $nodeTypeName, $nodePath, $parentNodeAggregate->nodeAggregateId, $serializedPropertyValuesAndReferences->serializedPropertyValues->getPropertyNames(), $claimedDimensionSpacePoints);
+        // deferred reference events flush after every variant creation event, so during the inline phase
+        // a variant's node record carries the references copied from its source, not its own row's ones
+        $this->visitedNodes->add($nodeAggregateId, new DimensionSpacePointSet([$originDimensionSpacePoint->toDimensionSpacePoint()]), $nodeTypeName, $nodePath, $parentNodeAggregate->nodeAggregateId, $serializedPropertyValuesAndReferences->serializedPropertyValues->getPropertyNames(), $variantSource?->referenceNames ?? $serializedPropertyValuesAndReferences->references->getReferenceNames(), $claimedDimensionSpacePoints);
     }
 
     /**
@@ -377,71 +396,76 @@ final class EventExportProcessor implements ProcessorInterface
     }
 
     /**
-     * Produces a node variant creation event (NodeSpecializationVariantWasCreated, NodeGeneralizationVariantWasCreated or NodePeerVariantWasCreated) and the corresponding NodePropertiesWereSet event
-     * if another variant of the specified node has been processed already.
+     * Determines the previously visited variant an already visited node aggregate has to be varied from
+     * when it is visited for another dimension, without producing any events.
      *
      * NOTE: We prioritize specializations/generalizations over peer variants ("ch" creates a specialization variant of "de" rather than a peer of "en" if both has been seen before).
-     * For that reason we loop over all previously visited dimension space points until we encounter a specialization/generalization. Otherwise, the last NodePeerVariantWasCreated will be used
+     * For that reason we loop over all previously visited dimension space points until we encounter a specialization/generalization. Otherwise, the last visited peer will be used.
+     *
+     * Returns null if no previously visited variant qualifies as a variation source.
      */
-    private function createNodeVariant(NodeAggregateId $nodeAggregateId, OriginDimensionSpacePoint $originDimensionSpacePoint, DimensionSpacePointSet $coveredDimensionSpacePoints, SerializedPropertyValuesAndReferences $serializedPropertyValuesAndReferences, VisitedNodeAggregate $parentNodeAggregate): void
+    private function determineVariantSource(NodeAggregateId $nodeAggregateId, OriginDimensionSpacePoint $originDimensionSpacePoint): ?VisitedNodeVariant
     {
-        $alreadyVisitedOriginDimensionSpacePoints = $this->visitedNodes->alreadyVisitedOriginDimensionSpacePoints($nodeAggregateId);
-        $variantCreatedEvent = null;
         $variantSourceOriginDimensionSpacePoint = null;
-        foreach ($alreadyVisitedOriginDimensionSpacePoints as $alreadyVisitedOriginDimensionSpacePoint) {
+        foreach ($this->visitedNodes->alreadyVisitedOriginDimensionSpacePoints($nodeAggregateId) as $alreadyVisitedOriginDimensionSpacePoint) {
             $variantType = $this->interDimensionalVariationGraph->getVariantType($originDimensionSpacePoint->toDimensionSpacePoint(), $alreadyVisitedOriginDimensionSpacePoint->toDimensionSpacePoint());
-            $variantCreatedEvent = match ($variantType) {
-                VariantType::TYPE_SPECIALIZATION => new NodeSpecializationVariantWasCreated(
-                    $this->workspaceName,
-                    $this->contentStreamId,
-                    $nodeAggregateId,
-                    $alreadyVisitedOriginDimensionSpacePoint,
-                    $originDimensionSpacePoint,
-                    InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
-                        $coveredDimensionSpacePoints
-                    )
-                ),
-                VariantType::TYPE_GENERALIZATION => new NodeGeneralizationVariantWasCreated(
-                    $this->workspaceName,
-                    $this->contentStreamId,
-                    $nodeAggregateId,
-                    $alreadyVisitedOriginDimensionSpacePoint,
-                    $originDimensionSpacePoint,
-                    InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
-                        $coveredDimensionSpacePoints,
-                    )
-                ),
-                VariantType::TYPE_PEER => new NodePeerVariantWasCreated(
-                    $this->workspaceName,
-                    $this->contentStreamId,
-                    $nodeAggregateId,
-                    $alreadyVisitedOriginDimensionSpacePoint,
-                    $originDimensionSpacePoint,
-                    InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
-                        $coveredDimensionSpacePoints,
-                    ),
-                ),
-                VariantType::TYPE_SAME => null,
-            };
-            $variantSourceOriginDimensionSpacePoint = $alreadyVisitedOriginDimensionSpacePoint;
-            if ($variantCreatedEvent instanceof NodeSpecializationVariantWasCreated || $variantCreatedEvent instanceof NodeGeneralizationVariantWasCreated) {
+            $variantSourceOriginDimensionSpacePoint = $variantType === VariantType::TYPE_SAME ? null : $alreadyVisitedOriginDimensionSpacePoint;
+            if ($variantType === VariantType::TYPE_SPECIALIZATION || $variantType === VariantType::TYPE_GENERALIZATION) {
                 break;
             }
         }
-        if ($variantCreatedEvent === null) {
-            throw new MigrationException(sprintf('Node "%s" for dimension %s was already created previously', $nodeAggregateId->value, $originDimensionSpacePoint->toJson()), 1656057201);
-        }
-        $this->exportEvent($variantCreatedEvent);
-
-        $sourceVariant = $variantSourceOriginDimensionSpacePoint !== null
+        return $variantSourceOriginDimensionSpacePoint !== null
             ? $this->visitedNodes->getByNodeAggregateId($nodeAggregateId)->getVariant($variantSourceOriginDimensionSpacePoint)
             : null;
+    }
+
+    /**
+     * Produces a node variant creation event (NodeSpecializationVariantWasCreated, NodeGeneralizationVariantWasCreated or NodePeerVariantWasCreated) and the corresponding NodePropertiesWereSet event
+     * for a node aggregate another variant of which has been processed already, see {@see determineVariantSource()}.
+     */
+    private function createNodeVariant(NodeAggregateId $nodeAggregateId, OriginDimensionSpacePoint $originDimensionSpacePoint, VisitedNodeVariant $variantSource, DimensionSpacePointSet $coveredDimensionSpacePoints, SerializedPropertyValuesAndReferences $serializedPropertyValuesAndReferences, VisitedNodeAggregate $parentNodeAggregate): void
+    {
+        $variantType = $this->interDimensionalVariationGraph->getVariantType($originDimensionSpacePoint->toDimensionSpacePoint(), $variantSource->originDimensionSpacePoint->toDimensionSpacePoint());
+        $variantCreatedEvent = match ($variantType) {
+            VariantType::TYPE_SPECIALIZATION => new NodeSpecializationVariantWasCreated(
+                $this->workspaceName,
+                $this->contentStreamId,
+                $nodeAggregateId,
+                $variantSource->originDimensionSpacePoint,
+                $originDimensionSpacePoint,
+                InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
+                    $coveredDimensionSpacePoints
+                )
+            ),
+            VariantType::TYPE_GENERALIZATION => new NodeGeneralizationVariantWasCreated(
+                $this->workspaceName,
+                $this->contentStreamId,
+                $nodeAggregateId,
+                $variantSource->originDimensionSpacePoint,
+                $originDimensionSpacePoint,
+                InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
+                    $coveredDimensionSpacePoints,
+                )
+            ),
+            VariantType::TYPE_PEER => new NodePeerVariantWasCreated(
+                $this->workspaceName,
+                $this->contentStreamId,
+                $nodeAggregateId,
+                $variantSource->originDimensionSpacePoint,
+                $originDimensionSpacePoint,
+                InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
+                    $coveredDimensionSpacePoints,
+                ),
+            ),
+            VariantType::TYPE_SAME => throw new MigrationException(sprintf('Node "%s" for dimension %s was already created previously', $nodeAggregateId->value, $originDimensionSpacePoint->toJson()), 1656057201),
+        };
+        $this->exportEvent($variantCreatedEvent);
 
         // the variant event copied the full property set of its source dimension. unset every property this
         // dimension's node data row does not set, so a copied-over value does not surface where the row left
         // the property empty or did not carry it at all.
         $ownPropertyNames = $serializedPropertyValuesAndReferences->serializedPropertyValues->getPropertyNames();
-        $copiedPropertyNames = $sourceVariant?->propertyNames ?? PropertyNames::createEmpty();
+        $copiedPropertyNames = $variantSource->propertyNames;
         $propertiesToUnset = $copiedPropertyNames->getDifference($ownPropertyNames);
         if ($serializedPropertyValuesAndReferences->serializedPropertyValues->count() > 0
             || !$propertiesToUnset->isEmpty()
@@ -459,14 +483,9 @@ final class EventExportProcessor implements ProcessorInterface
             );
         }
 
-        // TODO: We should also set references here, shouldn't we?
-
         // When we specialize/generalize, we create a node variant at exactly the same tree location as the source node
         // If the parent node aggregate id differs, we need to move the just created variant to the new location
-        if (
-            $sourceVariant !== null &&
-            !$parentNodeAggregate->nodeAggregateId->equals($sourceVariant->parentNodeAggregateId)
-        ) {
+        if (!$parentNodeAggregate->nodeAggregateId->equals($variantSource->parentNodeAggregateId)) {
             $this->exportEvent(new NodeAggregateWasMoved(
                 $this->workspaceName,
                 $this->contentStreamId,

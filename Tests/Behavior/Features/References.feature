@@ -70,6 +70,62 @@ Feature: Migrations that contain nodes with "reference" or "references propertie
       | NodeReferencesWereSet               | {"nodeAggregateId":"b","affectedSourceOriginDimensionSpacePoints":[{"language": "de"}],"references":[{"referenceName":"ref","references":[{"target":"a"}]}]}                                                      |
       | NodeReferencesWereSet               | {"nodeAggregateId":"c","affectedSourceOriginDimensionSpacePoints":[{"language": "ch"}],"references":[{"referenceName":"refs","references":[{"target":"a"},{"target":"b"}]}]} |
 
+  Scenario: A reference emptied in a variant is cleared instead of keeping the copied target
+    # the "en" peer variant is created as a copy of its "de" source including all reference relations.
+    # an emptied reference produces no entry in the variant's row, so the copied relation must be
+    # cleared explicitly via a reference entry without targets.
+    Given I change the content dimensions in content repository "default" to:
+      | Identifier | Default | Values     | Generalizations |
+      | language   | en      | en, de, ch | ch->de          |
+    When I have the following node data rows:
+      | Identifier | Path          | Node Type                 | Dimension Values     | Properties   |
+      | sites      | /sites        | unstructured              |                      |              |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["de"]} |              |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["en"]} |              |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["de"]} | {"ref": "b"} |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["en"]} | {"ref": ""}  |
+      | b          | /sites/site/b | Some.Package:SomeNodeType | {"language": ["de"]} |              |
+    And I run the event migration
+    Then I expect the following events to be exported
+      | Type                                | Payload                                                                                                                                      |
+      | RootNodeAggregateWithNodeWasCreated | {"nodeAggregateId": "sites"}                                                                                                                 |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "site", "originDimensionSpacePoint": {"language": "de"}}                                                                 |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "site", "sourceOrigin": {"language": "de"}, "peerOrigin": {"language": "en"}}                                            |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "a", "originDimensionSpacePoint": {"language": "de"}}                                                                    |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "a", "sourceOrigin": {"language": "de"}, "peerOrigin": {"language": "en"}}                                               |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "b"}                                                                                                                     |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "de"}],"references":[{"referenceName":"ref","references":[{"target":"b"}]}]} |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "en"}],"references":[{"referenceName":"ref","references":[]}]}               |
+
+  Scenario: A reference absent from a variant's row is cleared while its own references are kept
+    # the "en" peer variant copies the "ref" and "refs" relations from its "de" source. its row sets
+    # "refs" itself but does not carry "ref" at all, so the copied "ref" relation must be cleared in
+    # the same event that sets the row's own references.
+    Given I change the content dimensions in content repository "default" to:
+      | Identifier | Default | Values     | Generalizations |
+      | language   | en      | en, de, ch | ch->de          |
+    When I have the following node data rows:
+      | Identifier | Path          | Node Type                 | Dimension Values     | Properties                        |
+      | sites      | /sites        | unstructured              |                      |                                   |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["de"]} |                                   |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["en"]} |                                   |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["de"]} | {"ref": "b", "refs": ["b", "c"]}  |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["en"]} | {"refs": ["c"]}                   |
+      | b          | /sites/site/b | Some.Package:SomeNodeType | {"language": ["de"]} |                                   |
+      | c          | /sites/site/c | Some.Package:SomeNodeType | {"language": ["de"]} |                                   |
+    And I run the event migration
+    Then I expect the following events to be exported
+      | Type                                | Payload                                                                                                                                      |
+      | RootNodeAggregateWithNodeWasCreated | {"nodeAggregateId": "sites"}                                                                                                                 |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "site", "originDimensionSpacePoint": {"language": "de"}}                                                                 |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "site", "sourceOrigin": {"language": "de"}, "peerOrigin": {"language": "en"}}                                            |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "a", "originDimensionSpacePoint": {"language": "de"}}                                                                    |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "a", "sourceOrigin": {"language": "de"}, "peerOrigin": {"language": "en"}}                                               |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "b"}                                                                                                                     |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "c"}                                                                                                                     |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "de"}],"references":[{"referenceName":"ref","references":[{"target":"b"}]},{"referenceName":"refs","references":[{"target":"b"},{"target":"c"}]}]} |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "en"}],"references":[{"referenceName":"refs","references":[{"target":"c"}]},{"referenceName":"ref","references":[]}]}                              |
+
   Scenario: Nodes with properties that are not part of the node type schema (see https://github.com/neos/neos-development-collection/issues/4804)
     When I have the following node data rows:
       | Identifier    | Path             | Node Type             | Properties                 |
