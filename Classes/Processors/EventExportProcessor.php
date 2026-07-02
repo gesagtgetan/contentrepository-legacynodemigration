@@ -426,6 +426,9 @@ final class EventExportProcessor implements ProcessorInterface
     private function createNodeVariant(NodeAggregateId $nodeAggregateId, OriginDimensionSpacePoint $originDimensionSpacePoint, VisitedNodeVariant $variantSource, DimensionSpacePointSet $coveredDimensionSpacePoints, SerializedPropertyValuesAndReferences $serializedPropertyValuesAndReferences, VisitedNodeAggregate $parentNodeAggregate): void
     {
         $variantType = $this->interDimensionalVariationGraph->getVariantType($originDimensionSpacePoint->toDimensionSpacePoint(), $variantSource->originDimensionSpacePoint->toDimensionSpacePoint());
+        // VariantType::TYPE_SAME is deliberately not handled: determineVariantSource() never yields
+        // a source of the node's own dimension, PHP fails with an \UnhandledMatchError should it ever occur
+        // @phpstan-ignore-next-line
         $variantCreatedEvent = match ($variantType) {
             VariantType::TYPE_SPECIALIZATION => new NodeSpecializationVariantWasCreated(
                 $this->workspaceName,
@@ -457,7 +460,6 @@ final class EventExportProcessor implements ProcessorInterface
                     $coveredDimensionSpacePoints,
                 ),
             ),
-            VariantType::TYPE_SAME => throw new MigrationException(sprintf('Node "%s" for dimension %s was already created previously', $nodeAggregateId->value, $originDimensionSpacePoint->toJson()), 1656057201),
         };
         $this->exportEvent($variantCreatedEvent);
 
