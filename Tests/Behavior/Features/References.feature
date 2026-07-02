@@ -126,6 +126,40 @@ Feature: Migrations that contain nodes with "reference" or "references propertie
       | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "de"}],"references":[{"referenceName":"ref","references":[{"target":"b"}]},{"referenceName":"refs","references":[{"target":"b"},{"target":"c"}]}]} |
       | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "en"}],"references":[{"referenceName":"refs","references":[{"target":"c"}]},{"referenceName":"ref","references":[]}]}                              |
 
+  Scenario: A variant of a variant clears the references copied from the original dimension
+    # reference events are exported after all variant creation events, so a variant of a variant copies
+    # the reference relations the original dimension carried, not the corrected ones of its direct source:
+    # "en" is created as a peer of "ch" while "ch" still holds the "refs" relation copied from "de", because
+    # the event replacing it with ch's own "ref" relation has not been applied yet. the empty "en" row must
+    # therefore clear "refs" (copied from "de" through "ch") and not "ch"'s own "ref".
+    Given I change the content dimensions in content repository "default" to:
+      | Identifier | Default | Values     | Generalizations |
+      | language   | en      | en, de, ch | ch->de          |
+    When I have the following node data rows:
+      | Identifier | Path          | Node Type                 | Dimension Values     | Properties      |
+      | sites      | /sites        | unstructured              |                      |                 |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["de"]} |                 |
+      | site       | /sites/site   | Some.Package:Homepage     | {"language": ["en"]} |                 |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["de"]} | {"refs": ["b"]} |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["ch"]} | {"ref": "c"}    |
+      | a          | /sites/site/a | Some.Package:SomeNodeType | {"language": ["en"]} |                 |
+      | b          | /sites/site/b | Some.Package:SomeNodeType | {"language": ["de"]} |                 |
+      | c          | /sites/site/c | Some.Package:SomeNodeType | {"language": ["de"]} |                 |
+    And I run the event migration
+    Then I expect the following events to be exported
+      | Type                                | Payload                                                                                                                                        |
+      | RootNodeAggregateWithNodeWasCreated | {"nodeAggregateId": "sites"}                                                                                                                   |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "site", "originDimensionSpacePoint": {"language": "de"}}                                                                   |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "site", "sourceOrigin": {"language": "de"}, "peerOrigin": {"language": "en"}}                                              |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "a", "originDimensionSpacePoint": {"language": "de"}}                                                                      |
+      | NodeSpecializationVariantWasCreated | {"nodeAggregateId": "a", "sourceOrigin": {"language": "de"}, "specializationOrigin": {"language": "ch"}}                                       |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "a", "sourceOrigin": {"language": "ch"}, "peerOrigin": {"language": "en"}}                                                 |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "b"}                                                                                                                       |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "c"}                                                                                                                       |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "de"}],"references":[{"referenceName":"refs","references":[{"target":"b"}]}]}                                        |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "ch"}],"references":[{"referenceName":"ref","references":[{"target":"c"}]},{"referenceName":"refs","references":[]}]} |
+      | NodeReferencesWereSet               | {"nodeAggregateId":"a","affectedSourceOriginDimensionSpacePoints":[{"language": "en"}],"references":[{"referenceName":"refs","references":[]}]}                                                      |
+
   Scenario: Nodes with properties that are not part of the node type schema (see https://github.com/neos/neos-development-collection/issues/4804)
     When I have the following node data rows:
       | Identifier    | Path             | Node Type             | Properties                 |
