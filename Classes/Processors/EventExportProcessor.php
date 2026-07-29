@@ -14,7 +14,6 @@ use Neos\ContentRepository\Core\DimensionSpace\OriginDimensionSpacePointSet;
 use Neos\ContentRepository\Core\DimensionSpace\VariantType;
 use Neos\ContentRepository\Core\EventStore\EventInterface;
 use Neos\ContentRepository\Core\EventStore\EventNormalizer;
-use Neos\ContentRepository\Core\Feature\Common\InterdimensionalSibling;
 use Neos\ContentRepository\Core\Feature\Common\InterdimensionalSiblings;
 use Neos\ContentRepository\Core\Feature\NodeCreation\Event\NodeAggregateWithNodeWasCreated;
 use Neos\ContentRepository\Core\Feature\NodeModification\Dto\PropertyValuesToWrite;
@@ -486,18 +485,19 @@ final class EventExportProcessor implements ProcessorInterface
         }
 
         // When we specialize/generalize, we create a node variant at exactly the same tree location as the source node
-        // If the parent node aggregate id differs, we need to move the just created variant to the new location
+        // If the parent node aggregate id differs, we need to move the just created variant to the new location.
+        // The variant creation event above placed the variant in every dimension space point it claims, so all of
+        // them have to move along, not only the origin: dimensions that fall back to this variant followed its node
+        // data row's parent in the legacy content repository. Restricted to the parent's coverage, as a move without
+        // a parent variant in place would fail on import.
         if (!$parentNodeAggregate->nodeAggregateId->equals($variantSource->parentNodeAggregateId)) {
             $this->exportEvent(new NodeAggregateWasMoved(
                 $this->workspaceName,
                 $this->contentStreamId,
                 $nodeAggregateId,
                 $parentNodeAggregate->nodeAggregateId,
-                new InterdimensionalSiblings(
-                    new InterdimensionalSibling(
-                        $originDimensionSpacePoint->toDimensionSpacePoint(),
-                        null
-                    )
+                InterdimensionalSiblings::fromDimensionSpacePointSetWithoutSucceedingSiblings(
+                    $coveredDimensionSpacePoints->getIntersection($parentNodeAggregate->getCoveredDimensionSpacePoints())
                 )
             ));
         }

@@ -111,6 +111,33 @@ Feature: Migrating nodes with content dimensions
       | NodeAggregateWasMoved               | {"nodeAggregateId": "a", "newParentNodeAggregateId": "b", "succeedingSiblingsForCoverage": [{"dimensionSpacePoint":{"language":"ch"},"nodeAggregateId":null}]}                                                                                                                    |
       | NodeSpecializationVariantWasCreated | {"nodeAggregateId": "a1", "sourceOrigin": {"language": "de"}, "specializationOrigin": {"language": "ch"}, "specializationSiblings": [{"dimensionSpacePoint":{"language": "ch"},"nodeAggregateId":null}]}                                                                          |
 
+  Scenario: A moved node variant takes the dimensions that fall back to it along to the new parent
+    # node "a" has no own "ch" row, so its "de" variant claims "ch" as fallback coverage. In the legacy
+    # content repository "ch" resolved to the "de" row under parent "q", so the move event must re-parent
+    # the whole claimed coverage of the variant, not only its origin dimension.
+    When I have the following node data rows:
+      | Identifier | Path            | Node Type             | Dimension Values     |
+      | sites      | /sites          | unstructured          |                      |
+      | site       | /sites/site     | Some.Package:Homepage | {"language": ["en"]} |
+      | site       | /sites/site     | Some.Package:Homepage | {"language": ["de"]} |
+      | p          | /sites/site/p   | Some.Package:Thing    | {"language": ["en"]} |
+      | p          | /sites/site/p   | Some.Package:Thing    | {"language": ["de"]} |
+      | q          | /sites/site/q   | Some.Package:Thing    | {"language": ["de"]} |
+      | a          | /sites/site/p/a | Some.Package:Thing    | {"language": ["en"]} |
+      | a          | /sites/site/q/a | Some.Package:Thing    | {"language": ["de"]} |
+    And I run the event migration
+    Then I expect the following events to be exported
+      | Type                                | Payload                                                                                                                                                                                                            |
+      | RootNodeAggregateWithNodeWasCreated | {}                                                                                                                                                                                                                 |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "site", "parentNodeAggregateId": "sites", "originDimensionSpacePoint": {"language": "en"}}                                                                                                     |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "site", "sourceOrigin": {"language": "en"}, "peerOrigin": {"language": "de"}}                                                                                                                  |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "p", "parentNodeAggregateId": "site", "originDimensionSpacePoint": {"language": "en"}}                                                                                                         |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "p", "sourceOrigin": {"language": "en"}, "peerOrigin": {"language": "de"}}                                                                                                                     |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "q", "parentNodeAggregateId": "site", "originDimensionSpacePoint": {"language": "de"}}                                                                                                         |
+      | NodeAggregateWithNodeWasCreated     | {"nodeAggregateId": "a", "parentNodeAggregateId": "p", "originDimensionSpacePoint": {"language": "en"}}                                                                                                            |
+      | NodePeerVariantWasCreated           | {"nodeAggregateId": "a", "sourceOrigin": {"language": "en"}, "peerOrigin": {"language": "de"}, "peerSucceedingSiblings": [{"dimensionSpacePoint":{"language": "de"},"nodeAggregateId":null},{"dimensionSpacePoint":{"language": "ch"},"nodeAggregateId":null}]} |
+      | NodeAggregateWasMoved               | {"nodeAggregateId": "a", "newParentNodeAggregateId": "q", "succeedingSiblingsForCoverage": [{"dimensionSpacePoint":{"language":"de"},"nodeAggregateId":null},{"dimensionSpacePoint":{"language":"ch"},"nodeAggregateId":null}]}                                 |
+
 
   Scenario: A property emptied in a variant is unset instead of keeping the copied source value
     # the "en" peer variant is created as a copy of its "de" source, so it starts with text="hallo".

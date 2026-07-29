@@ -42,6 +42,20 @@ final class VisitedNodeAggregate
         $this->variants[$originDimensionSpacePoint->hash] = new VisitedNodeVariant($originDimensionSpacePoint, $parentNodeAggregateId, $propertyNames, $referenceNames, $claimedDimensionSpacePoints);
     }
 
+    /**
+     * The dimension space points the node aggregate covers in the exported structure, i.e. the union of the
+     * coverage all its variants' creation/variation events claimed. Complete once every node data row of the
+     * aggregate has been processed, which the parent-first row order guarantees for parent aggregates.
+     */
+    public function getCoveredDimensionSpacePoints(): DimensionSpacePointSet
+    {
+        $coveredDimensionSpacePoints = new DimensionSpacePointSet([]);
+        foreach ($this->variants as $variant) {
+            $coveredDimensionSpacePoints = $coveredDimensionSpacePoints->getUnion($variant->claimedDimensionSpacePoints);
+        }
+        return $coveredDimensionSpacePoints;
+    }
+
     public function getOriginDimensionSpacePoints(): OriginDimensionSpacePointSet
     {
         return new OriginDimensionSpacePointSet(array_map(static fn (VisitedNodeVariant $nodeVariant) => $nodeVariant->originDimensionSpacePoint, $this->variants));
