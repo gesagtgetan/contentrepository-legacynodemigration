@@ -496,6 +496,28 @@ final class EventExportProcessor implements ProcessorInterface
         );
     }
 
+    /**
+     * Duplicate of the protected core method {@see \Neos\ContentRepository\Core\Feature\Common\NodeVariationInternals::calculateEffectiveVisibility()}: a variant covers
+     * the specialization set of its origin, except dimension space points already covered by a nearer variant,
+     * i.e. by an occupied origin that is itself a specialization of the given origin (including that origin's
+     * own specializations).
+     */
+    private function calculateEffectiveVisibility(OriginDimensionSpacePoint $originDimensionSpacePoint, OriginDimensionSpacePointSet $occupiedOrigins): DimensionSpacePointSet
+    {
+        $specializations = $this->interDimensionalVariationGraph->getIndexedSpecializations($originDimensionSpacePoint->toDimensionSpacePoint());
+        $excludedSet = new DimensionSpacePointSet([]);
+        foreach ($occupiedOrigins as $occupiedOrigin) {
+            if ($specializations->contains($occupiedOrigin->toDimensionSpacePoint())) {
+                $excludedSet = $excludedSet->getUnion($this->interDimensionalVariationGraph->getSpecializationSet($occupiedOrigin->toDimensionSpacePoint()));
+            }
+        }
+        return $this->interDimensionalVariationGraph->getSpecializationSet(
+            $originDimensionSpacePoint->toDimensionSpacePoint(),
+            true,
+            $excludedSet
+        );
+    }
+
     private function isAutoCreatedChildNode(NodeTypeName $parentNodeTypeName, NodeName $nodeName): bool
     {
         $nodeTypeOfParent = $this->nodeTypeManager->getNodeType($parentNodeTypeName);
