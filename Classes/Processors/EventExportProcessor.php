@@ -484,16 +484,14 @@ final class EventExportProcessor implements ProcessorInterface
 
     /**
      * Resolves the dimension space points a new variant of the node aggregate in the given origin claims for
-     * itself, i.e. the coverage of the exported creation/variation event: the specialization set of the origin,
-     * excluding the origins of previously visited variants.
+     * itself, i.e. the coverage of the exported creation/variation event.
+     *
+     * Follows the core variant semantics ({@see calculateEffectiveVisibility()}): dimension space points that
+     * fall back to a nearer variant stay with it, no matter in which order the node data rows are processed.
      */
     private function resolveCoverageClaim(NodeAggregateId $nodeAggregateId, OriginDimensionSpacePoint $originDimensionSpacePoint): DimensionSpacePointSet
     {
-        return $this->interDimensionalVariationGraph->getSpecializationSet(
-            $originDimensionSpacePoint->toDimensionSpacePoint(),
-            true,
-            $this->visitedNodes->alreadyVisitedOriginDimensionSpacePoints($nodeAggregateId)->toDimensionSpacePointSet()
-        );
+        return $this->calculateEffectiveVisibility($originDimensionSpacePoint, $this->visitedNodes->alreadyVisitedOriginDimensionSpacePoints($nodeAggregateId));
     }
 
     /**
