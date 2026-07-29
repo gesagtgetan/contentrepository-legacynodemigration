@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Neos\ContentRepository\LegacyNodeMigration\Helpers;
 
+use Neos\ContentRepository\Core\DimensionSpace\DimensionSpacePoint;
 use Neos\ContentRepository\Core\DimensionSpace\DimensionSpacePointSet;
 use Neos\ContentRepository\Core\DimensionSpace\InterDimensionalVariationGraph;
 use Neos\ContentRepository\Core\DimensionSpace\OriginDimensionSpacePoint;
@@ -72,5 +73,21 @@ final class VisitedNodeAggregate
             $previouslyVisitedDimensionSpacePoints = $previouslyVisitedDimensionSpacePoints->getUnion(new DimensionSpacePointSet([$variant->originDimensionSpacePoint->toDimensionSpacePoint()]));
         }
         return $coverage;
+    }
+
+    /**
+     * Whether the given dimension space point resolves to the occupant via the fallback mechanism, i.e. the occupant
+     * is the nearest visited origin in its fallback chain, so the legacy content repository presented the occupant's
+     * variant (and visibility) in this dimension space point.
+     */
+    private function fallbackResolvesToOccupant(DimensionSpacePoint $dimensionSpacePoint, OriginDimensionSpacePoint $occupant, InterDimensionalVariationGraph $interDimensionalVariationGraph): bool
+    {
+        $visitedOrigins = $this->getOriginDimensionSpacePoints()->toDimensionSpacePointSet();
+        foreach ([$dimensionSpacePoint, ...$interDimensionalVariationGraph->getWeightedGeneralizations($dimensionSpacePoint)] as $fallback) {
+            if ($visitedOrigins->contains($fallback)) {
+                return $fallback->equals($occupant->toDimensionSpacePoint());
+            }
+        }
+        return false;
     }
 }
